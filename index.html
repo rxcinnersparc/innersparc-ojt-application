@@ -178,35 +178,68 @@
 
     <script>
         // ============================================================
-        // Inner SPARC — OJT Portal wrapper (CLEAN URLS)
+        // Inner SPARC — OJT Portal wrapper (ROLE-PREFIXED CLEAN URLS)
         //
         // Public URL forms on Vercel/GitHub Pages:
-        //   /              → home (intern)        / dashboard (admin)
-        //   /dashboard     → admin
-        //   /apply         → apply    (intern)
-        //   /attendance    → attendance
-        //   /documents     → documents
-        //   /faqs          → faqs     (intern)
-        //   /certificates  → certificates (admin)
-        //   /email         → email    (admin)
+        //   INTERN
+        //     /intern               → intern home
+        //     /intern/apply         → intern apply
+        //     /intern/attendance    → intern attendance
+        //     /intern/documents     → intern documents
+        //     /intern/faqs          → intern faqs
+        //
+        //   ADMIN
+        //     /admin                → admin dashboard
+        //     /admin/dashboard      → admin dashboard
+        //     /admin/attendance     → admin attendance
+        //     /admin/documents      → admin documents
+        //     /admin/certificates   → admin certificates
+        //     /admin/email          → admin email
+        //
+        // LEGACY SLUGS (still supported, auto-redirected where unambiguous):
+        //   /home /apply /attendance /documents /faqs
+        //   /dashboard /admin /certificates /email
         //
         // The wrapper doesn't enforce role — the GAS app does. If an
-        // intern hits /dashboard, GAS resolves it to their default
-        // page (attendance or home) and pushes a corrected URL back.
+        // intern hits /admin/dashboard, GAS resolves it to their default
+        // page and pushes a corrected URL back via portfolio:navigate.
         // ============================================================
 
         const GAS_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbz6wScCaIGgqISRoPGuaZkz1pizQ0mjFa5iq7TvCgjcp3LVjhxYEsZkMSI0uv6VVhjT/exec';
 
-        // Public URL slugs recognized by the wrapper.
+        // ────────────────────────────────────────────────────────────
+        // ROUTING VOCABULARY
+        // ────────────────────────────────────────────────────────────
+
+        // Internal page names the GAS app understands.
         const ROUTABLE = [
             'home', 'apply', 'attendance', 'documents', 'faqs',
-            'dashboard', 'admin', 'certificates', 'email'
+            'admin', 'certificates', 'email'
         ];
 
-        // Public slug  →  internal page name.
-        // Note: "dashboard" is the public name for the internal page "admin"
-        //       (the "admin" page is the Dashboard tab in the app).
-        const PATH_TO_PAGE = {
+        // Which pages belong to which role.
+        const ROLE_PAGES = {
+            intern: ['home', 'apply', 'attendance', 'documents', 'faqs'],
+            admin:  ['admin', 'attendance', 'documents', 'certificates', 'email']
+        };
+
+        // Page → public slug under a role prefix.
+        // NOTE: intern "home" → "" (i.e. /intern is the home).
+        //       admin  "admin" → "dashboard" (nicer public name).
+        const PAGE_TO_SLUG = {
+            home:         '',
+            apply:        'apply',
+            attendance:   'attendance',
+            documents:    'documents',
+            faqs:         'faqs',
+            admin:        'dashboard',
+            certificates: 'certificates',
+            email:        'email'
+        };
+
+        // Legacy (un-prefixed) slug → internal page name.
+        // Used only for backward-compat redirects.
+        const LEGACY_SLUG_TO_PAGE = {
             'home':         'home',
             'apply':        'apply',
             'attendance':   'attendance',
@@ -214,20 +247,6 @@
             'faqs':         'faqs',
             'dashboard':    'admin',
             'admin':        'admin',
-            'certificates': 'certificates',
-            'email':        'email'
-        };
-
-        // Internal page name → public slug.
-        // "admin" maps to "dashboard" — we prefer the more descriptive
-        // public slug so the URL bar reads "/dashboard" instead of "/admin".
-        const PAGE_TO_PATH = {
-            'home':         'home',
-            'apply':        'apply',
-            'attendance':   'attendance',
-            'documents':    'documents',
-            'faqs':         'faqs',
-            'admin':        'dashboard',
             'certificates': 'certificates',
             'email':        'email'
         };
@@ -240,6 +259,91 @@
         
         let hasLoaded = false;
         let loadTimeout;
+
+        // ------------------------------------------------------------
+        // Path ⇄ page translators (role-prefixed aware)
+        //
+        // Returns { role, page, legacy } where role is
+        // 'intern' | 'admin' | null.
+        //
+        //   role:   detected role prefix from the URL (or null for legacy)
+        //   page:   internal page name
+        //   legacy: true when the path is an un-prefixed slug (candidate
+        //           for redirect to the prefixed form)
+        // ------------------------------------------------------------
+        function parsePathname(pathname) {
+            var clean = (pathname || '/').replace(/^\/+|\/+$/g, '').toLowerCase();
+            if (!clean || clean === 'index.html') {
+                return { role: null, page: 'home', legacy: true };
+            }
+
+            var parts = clean.split('/');
+            var first = parts[0];
+            var second = parts.slice(1).join('/');
+
+            // ── New scheme: /intern/* or /admin/* ──
+            if (first === 'intern') {
+                if (!second) return { role: 'intern', page: 'home', legacy: false };
+                var internSlugMap = {
+                    'home': 'home', 'apply': 'apply',
+                    'attendance': 'attendance', 'documents': 'documents',
+                    'faqs': 'faqs'
+                };
+                if (internSlugMap[second]) {
+                    return { role: 'intern', page: internSlugMap[second], legacy: false };
+                }
+                // Unknown /intern/xxx → fall back to /intern (home)
+                return { role: 'intern', page: 'home', legacy: false };
+            }
+            if (first === 'admin') {
+                if (!second) return { role: 'admin', page: 'admin', legacy: false };
+                var adminSlugMap = {
+                    'dashboard': 'admin', 'attendance': 'attendance',
+                    'documents': 'documents', 'certificates': 'certificates',
+                    'email': 'email'
+                };
+                if (adminSlugMap[second]) {
+                    return { role: 'admin', page: adminSlugMap[second], legacy: false };
+                }
+                // Unknown /admin/xxx → fall back to /admin (dashboard)
+                return { role: 'admin', page: 'admin', legacy: false };
+            }
+
+            // ── Legacy scheme: /home, /dashboard, etc. ──
+            if (LEGACY_SLUG_TO_PAGE[first]) {
+                return { role: null, page: LEGACY_SLUG_TO_PAGE[first], legacy: true };
+            }
+
+            // Unknown path → default to intern home (legacy flag on)
+            return { role: null, page: 'home', legacy: true };
+        }
+
+        // Convenience: just the internal page name (used by GAS handshake).
+        function pathnameToPage(pathname) {
+            return parsePathname(pathname).page;
+        }
+
+        // Build a role-prefixed pathname for a given page + role.
+        // If role is unknown, falls back to the legacy un-prefixed slug.
+        function pageToPathname(page, role) {
+            var p = (page || '').toString().trim().toLowerCase();
+            if (!p) p = 'home';
+
+            var slug = PAGE_TO_SLUG[p];
+            if (slug === undefined) slug = p;   // unknown page — pass through
+
+            if (role === 'intern' || role === 'admin') {
+                // /intern  for intern home; /admin/dashboard for admin.
+                if (role === 'intern' && slug === '') return '/intern';
+                return '/' + role + (slug ? '/' + slug : '');
+            }
+
+            // No role known — legacy form
+            if (p === 'home') return '/';
+            // Prefer the friendlier "dashboard" for admin page
+            if (p === 'admin') return '/dashboard';
+            return '/' + slug;
+        }
 
         // ------------------------------------------------------------
         // Cache the initial page from the URL.
@@ -272,57 +376,63 @@
         //   So: only run the handshake when the user pasted a URL
         //   with a SPECIFIC, non-root page.
         // ------------------------------------------------------------
-        const INITIAL_PAGE_FROM_URL = pathnameToPage(window.location.pathname);
+        const INITIAL_PARSE = parsePathname(window.location.pathname);
+        const INITIAL_PAGE_FROM_URL = INITIAL_PARSE.page;
+        const INITIAL_ROLE_FROM_URL = INITIAL_PARSE.role;
         const SHOULD_FORCE_HANDSHAKE =
             INITIAL_PAGE_FROM_URL &&
             INITIAL_PAGE_FROM_URL !== 'home';
         console.log(
             '[Wrapper] Initial page from URL:',
             INITIAL_PAGE_FROM_URL,
+            '| role:',
+            INITIAL_ROLE_FROM_URL,
             '| force handshake:',
             SHOULD_FORCE_HANDSHAKE
         );
 
         // ------------------------------------------------------------
-        // Path ⇄ page translators
+        // Legacy-slug redirect: /dashboard → /admin/dashboard, etc.
+        // Runs BEFORE iframe creation so GAS gets the correct ?page=.
+        // Uses replaceState so no extra history entry is created.
         // ------------------------------------------------------------
-        function pathnameToPage(pathname) {
-            var p = (pathname || '/').replace(/^\/+|\/+$/g, '').toLowerCase();
-            if (!p || p === 'index.html') return 'home';
-            if (ROUTABLE.indexOf(p) === -1) return 'home';
-            return PATH_TO_PAGE[p] || 'home';
-        }
+        (function migrateLegacyPaths() {
+            try {
+                var parsed = parsePathname(window.location.pathname);
+                if (!parsed.legacy) return;   // already prefixed — nothing to do
 
-        function pageToPathname(page) {
-            var p = (page || '').toString().trim().toLowerCase();
-            if (!p || p === 'home') return '/';
-            var slug = PAGE_TO_PATH[p];
-            if (!slug) return '/';
-            return '/' + slug;
-        }
+                // Don't redirect the root "/" — GAS owns role resolution there.
+                var clean = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').toLowerCase();
+                if (!clean || clean === 'index.html') return;
+
+                // Decide the prefix. If the legacy slug is unambiguously
+                // admin-only, use admin; if intern-only, use intern.
+                // Otherwise, let the GAS app decide (keep legacy path,
+                // GAS will push a corrected URL via portfolio:navigate).
+                var adminOnlyPages  = ['admin', 'certificates', 'email'];
+                var internOnlyPages = ['home', 'apply', 'faqs'];
+
+                var role = null;
+                if (adminOnlyPages.indexOf(parsed.page) !== -1)  role = 'admin';
+                if (internOnlyPages.indexOf(parsed.page) !== -1) role = 'intern';
+
+                // Shared pages (attendance/documents) — leave unprefixed.
+                // GAS will resolve role and push the correct prefixed URL.
+                if (!role) return;
+
+                var newPath = pageToPathname(parsed.page, role);
+                if (newPath === window.location.pathname) return;
+
+                window.history.replaceState(
+                    { page: parsed.page, role: role },
+                    '',
+                    newPath + window.location.search + window.location.hash
+                );
+            } catch (e) { /* ignore */ }
+        })();
 
         // ------------------------------------------------------------
-        // Build the iframe src from the current window.location.
-        // The GAS app speaks ?page= internally. We send the internal
-        // page name; GAS decides what to do with it based on role.
-        // ------------------------------------------------------------
-        function buildIframeUrl() {
-            var page = pathnameToPage(window.location.pathname);
-            var url = new URL(GAS_WEBAPP_URL);
-            if (page && page !== 'home') url.searchParams.set('page', page);
-
-            // Forward unrelated query params (utm_*, etc.) untouched.
-            var incoming = new URLSearchParams(window.location.search);
-            incoming.forEach(function (value, key) {
-                if (key === 'page') return;
-                url.searchParams.set(key, value);
-            });
-
-            return url.toString();
-        }
-
-        // ------------------------------------------------------------
-        // Legacy redirect: /?page=dashboard → /dashboard
+        // Legacy ?page=... query string → redirect to prefixed path.
         // ------------------------------------------------------------
         (function migrateLegacyQueryString() {
             try {
@@ -330,11 +440,21 @@
                 var legacy = params.get('page');
                 if (!legacy) return;
 
-                var cleanPath = pageToPathname(legacy);
+                var internal = LEGACY_SLUG_TO_PAGE[legacy] || legacy;
+                // Guess role from unambiguous slugs; otherwise just
+                // leave the internal page name in the URL for GAS to
+                // correct via portfolio:navigate.
+                var adminOnly  = ['admin', 'certificates', 'email'];
+                var internOnly = ['home', 'apply', 'faqs'];
+                var role = null;
+                if (adminOnly.indexOf(internal) !== -1)  role = 'admin';
+                if (internOnly.indexOf(internal) !== -1) role = 'intern';
+
+                var cleanPath = pageToPathname(internal, role);
                 params.delete('page');
                 var tail = params.toString();
                 var newUrl = cleanPath + (tail ? ('?' + tail) : '');
-                window.history.replaceState({ page: legacy }, '', newUrl);
+                window.history.replaceState({ page: internal, role: role }, '', newUrl);
             } catch (e) { /* ignore */ }
         })();
 
@@ -379,6 +499,26 @@
         iframe.addEventListener('load', onIframeLoad);
         iframe.addEventListener('error', onIframeError);
 
+        // ------------------------------------------------------------
+        // Build the iframe src from the current window.location.
+        // The GAS app speaks ?page= internally. We send the internal
+        // page name; GAS decides what to do with it based on role.
+        // ------------------------------------------------------------
+        function buildIframeUrl() {
+            var page = pathnameToPage(window.location.pathname);
+            var url = new URL(GAS_WEBAPP_URL);
+            if (page && page !== 'home') url.searchParams.set('page', page);
+
+            // Forward unrelated query params (utm_*, etc.) untouched.
+            var incoming = new URLSearchParams(window.location.search);
+            incoming.forEach(function (value, key) {
+                if (key === 'page') return;
+                url.searchParams.set(key, value);
+            });
+
+            return url.toString();
+        }
+
         const iframeUrl = buildIframeUrl();
         iframe.src = iframeUrl;
 
@@ -412,10 +552,16 @@
             const data = event.data;
             if (!data || !data.type) return;
 
-            // Click / role-corrected navigation: create a new history entry
+            // Click / role-corrected navigation: create a new history entry.
+            // GAS may include `role` ('intern' | 'admin') so we can build
+            // the correctly-prefixed public URL.
             if (data.type === 'portfolio:navigate') {
                 const page = (data.page || 'home').toString();
-                const newPath = pageToPathname(page);
+                const role = (data.role === 'intern' || data.role === 'admin')
+                    ? data.role
+                    : null;
+
+                const newPath = pageToPathname(page, role);
 
                 const url = new URL(window.location.href);
                 url.pathname = newPath;
@@ -426,9 +572,9 @@
 
                 if (target !== current) {
                     if (data.replace) {
-                        window.history.replaceState({ page: page }, '', target);
+                        window.history.replaceState({ page: page, role: role }, '', target);
                     } else {
-                        window.history.pushState({ page: page }, '', target);
+                        window.history.pushState({ page: page, role: role }, '', target);
                     }
                 }
 
@@ -439,7 +585,10 @@
             // Scroll spy: update URL silently
             if (data.type === 'portfolio:section') {
                 const page = (data.page || 'home').toString();
-                const newPath = pageToPathname(page);
+                const role = (data.role === 'intern' || data.role === 'admin')
+                    ? data.role
+                    : null;
+                const newPath = pageToPathname(page, role);
 
                 const url = new URL(window.location.href);
                 url.pathname = newPath;
@@ -449,7 +598,7 @@
                 const current = window.location.pathname + window.location.search + window.location.hash;
 
                 if (target !== current) {
-                    window.history.replaceState({ page: page }, '', target);
+                    window.history.replaceState({ page: page, role: role }, '', target);
                 }
 
                 if (data.title) document.title = data.title;
