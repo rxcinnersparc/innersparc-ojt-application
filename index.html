@@ -256,9 +256,32 @@
         // intent and can force GAS onto the right page via the
         // portfolio:popstate handshake, regardless of what URL GAS
         // has pushed so far.
+        //
+        // IMPORTANT — special case for the root URL ("/"):
+        //   When the user lands on "/", we DON'T know what page they
+        //   should actually see. It depends on their role and OJT
+        //   status, both of which only GAS can determine. So we must
+        //   NOT force a handshake in that case — GAS's own role-based
+        //   resolution ("Ongoing intern → attendance", "Admin →
+        //   admin", etc.) is the correct authority.
+        //
+        //   If we DID force the handshake, we'd send GAS back to
+        //   "home" right after it landed on "attendance", producing
+        //   exactly the regression we saw.
+        //
+        //   So: only run the handshake when the user pasted a URL
+        //   with a SPECIFIC, non-root page.
         // ------------------------------------------------------------
         const INITIAL_PAGE_FROM_URL = pathnameToPage(window.location.pathname);
-        console.log('[Wrapper] Initial page from URL:', INITIAL_PAGE_FROM_URL);
+        const SHOULD_FORCE_HANDSHAKE =
+            INITIAL_PAGE_FROM_URL &&
+            INITIAL_PAGE_FROM_URL !== 'home';
+        console.log(
+            '[Wrapper] Initial page from URL:',
+            INITIAL_PAGE_FROM_URL,
+            '| force handshake:',
+            SHOULD_FORCE_HANDSHAKE
+        );
 
         // ------------------------------------------------------------
         // Path ⇄ page translators
@@ -441,19 +464,48 @@
             if (data.type === 'portfolio:ready') {
                 iframeReady = true;
 
+                // ------------------------------------------------------------
+                // Decide whether to run the popstate handshake at all.
+                //
+                // We ONLY hand a page back to GAS when we have a
+                // specific, non-root URL that we know the user asked
+                // for. In that case, if GAS booted to the wrong page
+                // (e.g. its role-default), our cached value corrects it.
+                //
+                // We do NOT hand anything back when:
+                //   - INITIAL_PAGE_FROM_URL is 'home' (user hit the root)
+                //     GAS's role-aware resolution is authoritative. An
+                //     Ongoing intern correctly lands on 'attendance',
+                //     and we must not stomp that with 'home'.
+                //   - AND there's no buffered popstate either. A buffered
+                //     popstate means the user hit Back/Forward before
+                //     GAS was ready, which IS a specific intent we
+                //     should honor.
+                // ------------------------------------------------------------
+                const hasBuffered = (pendingPage !== null);
+                const shouldHandshake = hasBuffered || SHOULD_FORCE_HANDSHAKE;
+
+                if (!shouldHandshake) {
+                    console.log(
+                        '[Wrapper] portfolio:ready → no handshake needed ' +
+                        '(root load; GAS role-resolution is authoritative).'
+                    );
+                    pendingPage = null;
+                    return;
+                }
+
                 // Priority order for the page to hand back to GAS:
                 //   1. Buffered popstate target (user hit Back/Forward
                 //      before GAS finished booting) — wins because it's
                 //      the most recent user intent.
-                //   2. The cached initial page from the URL the user
-                //      pasted at cold-load time. This is the whole point
-                //      of caching it: it's immune to any URL rewrites
-                //      GAS may have done during its own boot sequence.
+                //   2. The cached initial page from a SPECIFIC URL the
+                //      user pasted at cold-load time. Immune to any URL
+                //      rewrites GAS may have done during its own boot.
                 //   3. Live pathname as a last-ditch fallback.
                 let initial;
-                if (pendingPage !== null) {
+                if (hasBuffered) {
                     initial = pendingPage;
-                } else if (INITIAL_PAGE_FROM_URL) {
+                } else if (SHOULD_FORCE_HANDSHAKE) {
                     initial = INITIAL_PAGE_FROM_URL;
                 } else {
                     initial = pathnameToPage(window.location.pathname);
